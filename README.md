@@ -99,6 +99,8 @@ and a **Refresh now** button. Connection settings are in a collapsible section.
 
 ## 📝 Discussion
 
+> Full write-up: **[DOCUMENTATION.md](DOCUMENTATION.md)**
+
 ### 1. API used: Open-Meteo Weather API
 [Open-Meteo](https://open-meteo.com) is a free, open-source weather API. It needs **no
 registration or API key** and returns JSON over HTTPS. It combines forecast models from national
