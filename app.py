@@ -370,8 +370,14 @@ def sidebar():
 
 
 def plot_defaults(fig, height=380, ytitle=None):
-    fig.update_layout(height=height, margin=dict(l=10, r=10, t=40, b=10), hovermode="x unified",
+    has_title = bool(fig.layout.title and fig.layout.title.text)
+    # title on the first line, legend on its own line below it (no overlap)
+    fig.update_layout(height=height, margin=dict(l=10, r=10, t=90 if has_title else 40, b=10),
+                      hovermode="x unified",
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, x=0, title=None))
+    if has_title:
+        fig.update_layout(title=dict(y=0.97, yref="container", yanchor="top", x=0, xanchor="left",
+                                     font=dict(size=16)))
     if ytitle:
         fig.update_yaxes(title=ytitle)
     fig.update_xaxes(title=None)
@@ -693,27 +699,42 @@ def page_analytics():
 
     # --- Trends: time-bucketed aggregation
     with tabs[0]:
-        gran = st.segmented_control("Aggregate by", list(storage.GRANULARITY), default="Hourly",
-                                    key="ana_gran") or "Hourly"
+        data_span = (stats["last"] - stats["first"]) if stats["first"] is not None else None
+        suggested = storage.suggest_granularity(data_span)
+        gran = st.segmented_control("Aggregate by", list(storage.GRANULARITY), default=suggested,
+                                    key="ana_gran") or suggested
         agg = c_agg(uri, db, gran, start, end, cities, (metric,), tzname)
         if agg.empty:
             st.info("No data for this selection.")
         else:
             a = localize(agg, ["bucket"])
+            n_buckets = a["bucket"].nunique()
             fig = go.Figure()
             for i, (city, g) in enumerate(a.groupby("location")):
                 color = PALETTE[i % len(PALETTE)]
-                fig.add_trace(go.Scatter(x=g["bucket"], y=g["max"], line=dict(width=0), showlegend=False,
-                                         hoverinfo="skip", legendgroup=city))
-                fig.add_trace(go.Scatter(x=g["bucket"], y=g["min"], fill="tonexty", line=dict(width=0),
-                                         fillcolor=_rgba(color, .12), showlegend=False, hoverinfo="skip",
-                                         legendgroup=city))
-                fig.add_trace(go.Scatter(x=g["bucket"], y=g["avg"], name=city, line=dict(color=color, width=2),
+                if n_buckets > 1:  # min-max band only makes sense with 2+ periods
+                    fig.add_trace(go.Scatter(x=g["bucket"], y=g["max"], line=dict(width=0), showlegend=False,
+                                             hoverinfo="skip", legendgroup=city))
+                    fig.add_trace(go.Scatter(x=g["bucket"], y=g["min"], fill="tonexty", line=dict(width=0),
+                                             fillcolor=_rgba(color, .12), showlegend=False, hoverinfo="skip",
+                                             legendgroup=city))
+                fig.add_trace(go.Scatter(x=g["bucket"], y=g["avg"], name=city, mode="lines+markers",
+                                         line=dict(color=color, width=2), marker=dict(size=7),
                                          legendgroup=city, customdata=g[["min", "max", "count"]],
                                          hovertemplate="%{y:.2f} (min %{customdata[0]:.1f}, max %{customdata[1]:.1f},"
                                                        " n=%{customdata[2]})<extra>" + city + "</extra>"))
-            fig.update_layout(title=f"{gran} average {metric_label(metric)} (shaded = min–max range)")
-            st.plotly_chart(plot_defaults(fig, 440, unit), width="stretch")
+            # sensible axes even with very little data
+            lo, hi = float(a["min"].min()), float(a["max"].max())
+            pad = max((hi - lo) * 0.15, 1.0)
+            fig.update_yaxes(range=[lo - pad, hi + pad])
+            width = storage.GRANULARITY_WIDTH[gran]
+            fig.update_xaxes(range=[a["bucket"].min() - width / 2, a["bucket"].max() + width / 2])
+            band = " (shaded = min–max range)" if n_buckets > 1 else ""
+            fig.update_layout(title=f"{gran} average {metric_label(metric)}{band}")
+            st.plotly_chart(plot_defaults(fig, 460, unit), width="stretch")
+            if n_buckets == 1:
+                st.info(f"Only one {gran.lower()} period has been collected so far, so there is no trend line "
+                        "yet. Choose a shorter period (e.g. **5 minutes**) or let the pipeline run longer.")
             with st.expander(f"Aggregated table ({len(a):,} rows)"):
                 st.dataframe(a, hide_index=True, width="stretch")
                 st.download_button("⬇️ Download CSV", exports.to_csv(a), f"weather_{gran.lower().replace(' ', '_')}.csv",

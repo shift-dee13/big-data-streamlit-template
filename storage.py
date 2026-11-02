@@ -136,12 +136,34 @@ def query_recent(uri: str, db: str, minutes: int, cities=None) -> pd.DataFrame:
 # ---------------------------------------------------------------------------
 GRANULARITY = {
     # label: ($dateTrunc unit, binSize)
+    "5 minutes": ("minute", 5),
     "15 minutes": ("minute", 15),
     "Hourly": ("hour", 1),
     "6 hours": ("hour", 6),
     "Daily": ("day", 1),
     "Weekly": ("week", 1),
 }
+
+
+GRANULARITY_WIDTH = {"5 minutes": pd.Timedelta(minutes=5), "15 minutes": pd.Timedelta(minutes=15),
+                     "Hourly": pd.Timedelta(hours=1), "6 hours": pd.Timedelta(hours=6),
+                     "Daily": pd.Timedelta(days=1), "Weekly": pd.Timedelta(weeks=1)}
+
+
+def suggest_granularity(span) -> str:
+    """Pick a period that gives a readable number of points for how much data exists."""
+    if span is None:
+        return "Hourly"
+    hours = span.total_seconds() / 3600
+    if hours < 3:
+        return "5 minutes"
+    if hours < 12:
+        return "15 minutes"
+    if hours < 24 * 4:
+        return "Hourly"
+    if hours < 24 * 30:
+        return "6 hours"
+    return "Daily"
 
 
 def aggregate(uri: str, db: str, granularity: str, start=None, end=None, cities=None, metrics=None,
