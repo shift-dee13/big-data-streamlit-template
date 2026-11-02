@@ -408,10 +408,10 @@ def page_overview():
 
     st.subheader("Where would you like to go?")
     nav = [
-        ("pages/live", "📡 Live Monitor", "Watch new readings arrive from Kafka, refreshed every 15 seconds."),
-        ("pages/history", "🗂️ History", "Browse and filter every reading collected so far."),
-        ("pages/analytics", "📊 Analytics", "Aggregates, city comparisons, daily patterns and correlations."),
-        ("pages/export", "📥 Export", "Download data as CSV, Excel, JSON, a PDF report or chart images."),
+        ("pages/live", "Live Monitor", "Watch new readings arrive from Kafka, refreshed every 15 seconds."),
+        ("pages/history", "History", "Browse and filter every reading collected so far."),
+        ("pages/analytics", "Analytics", "Aggregates, city comparisons, daily patterns and correlations."),
+        ("pages/export", "Export", "Download data as CSV, Excel, JSON, a PDF report or chart images."),
     ]
     cols = st.columns(4)
     for col, (page, title, text) in zip(cols, nav):
