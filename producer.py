@@ -1,376 +1,264 @@
 """
-Kafka Producer Template for Streaming Data Dashboard
-STUDENT PROJECT: Big Data Streaming Data Producer
+Kafka Producer - Real Weather Data from the Open-Meteo API
+==========================================================
 
-This is a template for students to build a Kafka producer that generates and sends
-streaming data to Kafka for consumption by the dashboard.
+Polls the free Open-Meteo forecast API (https://open-meteo.com, no API key needed)
+for current weather in several cities and publishes one Kafka message per
+(city, metric) reading.
 
-DO NOT MODIFY THE TEMPLATE STRUCTURE - IMPLEMENT THE TODO SECTIONS
+Message schema (JSON):
+{
+    "timestamp":    "2026-11-02T07:15:00Z",   # ISO-8601 UTC time the reading was fetched
+    "value":        29.4,                     # numeric measurement
+    "metric_type":  "temperature",            # temperature | humidity | pressure | ...
+    "sensor_id":    "om-manila",              # one virtual "sensor" per city
+    "location":     "Manila",
+    "unit":         "°C",
+    "latitude":     14.5995,
+    "longitude":    120.9842,
+    "observed_at":  "2026-11-02T07:15",       # model time reported by the API
+    "weather_code": 3,
+    "weather_desc": "Overcast",
+    "source":       "open-meteo"
+}
+
+Usage:
+    python producer.py                      # stream forever (every 60 s)
+    python producer.py --interval 30        # custom poll interval
+    python producer.py --once --dry-run     # fetch once and print, no Kafka needed
 """
+
+from __future__ import annotations
 
 import argparse
 import json
+import signal
+import sys
 import time
-import random
-import math
-from datetime import datetime, timedelta
-from typing import Dict, Any, List
+from datetime import datetime, timezone
+from typing import Any, Dict, List
 
-# Kafka libraries
-from kafka import KafkaProducer
-from kafka.errors import KafkaError, NoBrokersAvailable
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+import config
+
+try:
+    from kafka import KafkaProducer
+    from kafka.errors import KafkaError, NoBrokersAvailable
+except ImportError:  # allows --dry-run without kafka-python installed
+    KafkaProducer = None
+    KafkaError = NoBrokersAvailable = Exception
+
+
+def log(msg: str) -> None:
+    print(f"[{datetime.now().strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+class OpenMeteoClient:
+    """Small HTTP client for the Open-Meteo forecast API with retries."""
+
+    def __init__(self, cities: List[dict], timeout: int = 15):
+        self.cities = cities
+        self.timeout = timeout
+        self.session = requests.Session()
+        retry = Retry(total=4, backoff_factor=1.5,
+                      status_forcelist=(429, 500, 502, 503, 504),
+                      allowed_methods=("GET",))
+        self.session.mount("https://", HTTPAdapter(max_retries=retry))
+
+    def fetch_current(self) -> List[dict]:
+        """Fetch current conditions for all cities in ONE request.
+
+        Returns a list with one API result per city (same order as self.cities).
+        """
+        params = {
+            "latitude": ",".join(str(c["lat"]) for c in self.cities),
+            "longitude": ",".join(str(c["lon"]) for c in self.cities),
+            "current": ",".join(list(config.METRICS.keys()) + ["weather_code"]),
+            "timezone": "GMT",
+            "wind_speed_unit": "kmh",
+        }
+        resp = self.session.get(config.OPEN_METEO_URL, params=params, timeout=self.timeout)
+        resp.raise_for_status()
+        payload = resp.json()
+        # A single location returns an object, several locations return a list
+        results = payload if isinstance(payload, list) else [payload]
+        if len(results) != len(self.cities):
+            raise ValueError(f"Expected {len(self.cities)} results, got {len(results)}")
+        for r in results:
+            if r.get("error"):
+                raise ValueError(f"API error: {r.get('reason')}")
+        return results
+
+
+def to_messages(api_results: List[dict], cities: List[dict], fetched_at: datetime) -> List[Dict[str, Any]]:
+    """Turn raw API results into flat Kafka messages (one per city and metric)."""
+    ts = fetched_at.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    messages = []
+    for city, result in zip(cities, api_results):
+        current = result.get("current") or {}
+        code = current.get("weather_code")
+        desc, _ = config.describe_weather(code)
+        for api_var, meta in config.METRICS.items():
+            value = current.get(api_var)
+            if value is None:
+                continue  # variable missing for this location - skip it
+            try:
+                value = float(value)
+            except (TypeError, ValueError):
+                continue
+            messages.append({
+                "timestamp": ts,
+                "value": round(value, 2),
+                "metric_type": meta["metric_type"],
+                "sensor_id": config.sensor_id_for(city["name"]),
+                "location": city["name"],
+                "unit": meta["unit"],
+                "latitude": city["lat"],
+                "longitude": city["lon"],
+                "observed_at": current.get("time"),
+                "weather_code": code,
+                "weather_desc": desc,
+                "source": "open-meteo",
+            })
+    return messages
 
 
 class StreamingDataProducer:
-    """
-    Enhanced Kafka producer with stateful synthetic data generation
-    This class handles Kafka connection, realistic data generation, and message sending
-    """
-    
-    def __init__(self, bootstrap_servers: str, topic: str):
-        """
-        Initialize Kafka producer configuration with stateful data generation
-        
-        Parameters:
-        - bootstrap_servers: Kafka broker addresses (e.g., "localhost:9092")
-        - topic: Kafka topic to produce messages to
-        """
+    """Kafka producer that streams real weather readings from Open-Meteo."""
+
+    def __init__(self, bootstrap_servers: str, topic: str, cities: List[dict], dry_run: bool = False):
         self.bootstrap_servers = bootstrap_servers
         self.topic = topic
-        
-        # Kafka producer configuration
-        self.producer_config = {
-            'bootstrap_servers': bootstrap_servers,
-            # 'security_protocol': 'SSL',  # If using SSL
-            # 'ssl_cafile': 'path/to/ca.pem',  # If using SSL
-            # 'ssl_certfile': 'path/to/service.cert',  # If using SSL
-            # 'ssl_keyfile': 'path/to/service.key',  # If using SSL
-            # 'compression_type': 'gzip',  # Optional: Enable compression
-            # 'batch_size': 16384,  # Optional: Tune batch size
-            # 'linger_ms': 10,  # Optional: Wait for batch fill
-        }
-        
-        # Stateful data generation attributes
-        self.sensor_states = {}  # Track state for each sensor
-        self.time_counter = 0    # Track time progression
-        self.base_time = datetime.utcnow()
-        
-        # Expanded sensor pool with metadata
-        self.sensors = [
-            {"id": "sensor_001", "location": "server_room_a", "type": "temperature", "unit": "celsius"},
-            {"id": "sensor_002", "location": "server_room_b", "type": "temperature", "unit": "celsius"},
-            {"id": "sensor_003", "location": "outdoor_north", "type": "temperature", "unit": "celsius"},
-            {"id": "sensor_004", "location": "lab_1", "type": "humidity", "unit": "percent"},
-            {"id": "sensor_005", "location": "lab_2", "type": "humidity", "unit": "percent"},
-            {"id": "sensor_006", "location": "control_room", "type": "pressure", "unit": "hPa"},
-            {"id": "sensor_007", "location": "factory_floor", "type": "pressure", "unit": "hPa"},
-            {"id": "sensor_008", "location": "warehouse", "type": "temperature", "unit": "celsius"},
-            {"id": "sensor_009", "location": "office_area", "type": "humidity", "unit": "percent"},
-            {"id": "sensor_010", "location": "basement", "type": "pressure", "unit": "hPa"},
-        ]
-        
-        # Metric type configurations
-        self.metric_ranges = {
-            "temperature": {"min": -10, "max": 45, "daily_amplitude": 8, "trend_range": (-0.5, 0.5)},
-            "humidity": {"min": 20, "max": 95, "daily_amplitude": 15, "trend_range": (-0.2, 0.2)},
-            "pressure": {"min": 980, "max": 1040, "daily_amplitude": 5, "trend_range": (-0.1, 0.1)},
-        }
-        
-        # Initialize Kafka producer
-        try:
-            self.producer = KafkaProducer(**self.producer_config)
-            print(f"Kafka producer initialized for {bootstrap_servers} on topic {topic}")
-        except NoBrokersAvailable:
-            print(f"ERROR: No Kafka brokers available at {bootstrap_servers}")
-            self.producer = None
-        except Exception as e:
-            print(f"ERROR: Failed to initialize Kafka producer: {e}")
-            self.producer = None
+        self.cities = cities
+        self.dry_run = dry_run
+        self.api = OpenMeteoClient(cities)
+        self.producer = None
+        self.sent_total = 0
+        self.failed_total = 0
+        self._running = True
+        if not dry_run:
+            self.producer = self._connect()
 
-    def generate_sample_data(self) -> Dict[str, Any]:
-        """
-        Generate realistic streaming data with stateful patterns
-        
-        This function creates continuously changing records with realistic patterns:
-        - Daily cycles using sine waves
-        - Gradual trends and realistic noise
-        - Multiple metric types (temperature, humidity, pressure)
-        - Temporal consistency with progressive timestamps
-        
-        Expected data format (must include these fields for dashboard compatibility):
-        {
-            "timestamp": "2023-10-01T12:00:00Z",  # ISO format timestamp
-            "value": 123.45,                      # Numeric measurement value
-            "metric_type": "temperature",         # Type of metric (temperature, humidity, etc.)
-            "sensor_id": "sensor_001",            # Unique identifier for data source
-            "location": "server_room_a",          # Sensor location
-            "unit": "celsius",                    # Measurement unit
-        }
-        """
-        
-        # Select a random sensor from the expanded pool
-        sensor = random.choice(self.sensors)
-        sensor_id = sensor["id"]
-        metric_type = sensor["type"]
-        
-        # Initialize sensor state if not exists
-        if sensor_id not in self.sensor_states:
-            config = self.metric_ranges[metric_type]
-            base_value = random.uniform(config["min"], config["max"])
-            trend = random.uniform(config["trend_range"][0], config["trend_range"][1])
-            phase_offset = random.uniform(0, 2 * 3.14159)  # Random phase for daily cycle
-            
-            self.sensor_states[sensor_id] = {
-                "base_value": base_value,
-                "trend": trend,
-                "phase_offset": phase_offset,
-                "last_value": base_value,
-                "message_count": 0
-            }
-        
-        state = self.sensor_states[sensor_id]
-        
-        # Calculate progressive timestamp with configurable intervals
-        current_time = self.base_time + timedelta(seconds=self.time_counter)
-        self.time_counter += random.uniform(0.5, 2.0)  # Variable intervals for realism
-        
-        # Generate realistic value with patterns
-        config = self.metric_ranges[metric_type]
-        
-        # Daily cycle using sine wave (24-hour period)
-        hours_in_day = 24
-        current_hour = current_time.hour + current_time.minute / 60
-        daily_cycle = math.sin(2 * 3.14159 * current_hour / hours_in_day + state["phase_offset"])
-        
-        # Apply trend over time (slow drift)
-        trend_effect = state["trend"] * (state["message_count"] / 100.0)
-        
-        # Add realistic noise (small random variations)
-        noise = random.uniform(-config["daily_amplitude"] * 0.1, config["daily_amplitude"] * 0.1)
-        
-        # Calculate final value with bounds checking
-        base_value = state["base_value"]
-        daily_variation = daily_cycle * config["daily_amplitude"]
-        raw_value = base_value + daily_variation + trend_effect + noise
-        
-        # Ensure value stays within reasonable bounds
-        bounded_value = max(config["min"], min(config["max"], raw_value))
-        
-        # Update state
-        state["last_value"] = bounded_value
-        state["message_count"] += 1
-        
-        # Occasionally introduce small trend changes for realism
-        if random.random() < 0.01:  # 1% chance per message
-            state["trend"] = random.uniform(config["trend_range"][0], config["trend_range"][1])
-        
-        # Generate realistic data structure
-        sample_data = {
-            "timestamp": current_time.isoformat() + 'Z',
-            "value": round(bounded_value, 2),
-            "metric_type": metric_type,
-            "sensor_id": sensor_id,
-            "location": sensor["location"],
-            "unit": sensor["unit"],
-        }
-        
-        return sample_data
+    def _connect(self, attempts: int = 20, delay: int = 5):
+        """Connect to Kafka, retrying so the producer can start before the broker."""
+        if KafkaProducer is None:
+            log("ERROR: kafka-python is not installed. Run: pip install -r requirements.txt")
+            sys.exit(1)
+        for attempt in range(1, attempts + 1):
+            try:
+                producer = KafkaProducer(
+                    bootstrap_servers=self.bootstrap_servers.split(","),
+                    value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+                    key_serializer=lambda k: k.encode("utf-8"),
+                    acks="all",
+                    retries=5,
+                    linger_ms=50,
+                )
+                log(f"Connected to Kafka at {self.bootstrap_servers}, topic '{self.topic}'")
+                return producer
+            except NoBrokersAvailable:
+                log(f"Kafka not reachable ({attempt}/{attempts}) - retrying in {delay}s...")
+                time.sleep(delay)
+        log("ERROR: could not connect to Kafka. Is the broker running?")
+        sys.exit(1)
 
-    def serialize_data(self, data: Dict[str, Any]) -> bytes:
-        """
-        STUDENT TODO: Implement data serialization
-        
-        Convert the data dictionary to bytes for Kafka transmission.
-        Common formats: JSON, Avro, Protocol Buffers
-        
-        For simplicity, we use JSON serialization in this template.
-        Consider using Avro for better schema evolution in production.
-        """
-        
-        # STUDENT TODO: Choose and implement your serialization method
-        try:
-            # JSON serialization (simple but less efficient)
-            serialized_data = json.dumps(data).encode('utf-8')
-            
-            # STUDENT TODO: Consider using Avro for better performance and schema management
-            # from avro import schema, datafile, io
-            # serialized_data = avro_serializer.serialize(data)
-            
-            return serialized_data
-        except Exception as e:
-            print(f"STUDENT TODO: Implement proper error handling for serialization: {e}")
-            return None
+    def send_messages(self, messages: List[Dict[str, Any]]) -> int:
+        """Send a batch of messages. Key = sensor_id keeps each city's order in one partition."""
+        if self.dry_run:
+            for m in messages:
+                print(json.dumps(m, ensure_ascii=False))
+            return len(messages)
+        futures = [self.producer.send(self.topic, key=m["sensor_id"], value=m) for m in messages]
+        self.producer.flush(timeout=30)
+        ok = 0
+        for f in futures:
+            try:
+                f.get(timeout=10)
+                ok += 1
+            except KafkaError as e:
+                self.failed_total += 1
+                log(f"Kafka send error: {e}")
+        return ok
 
-    def send_message(self, data: Dict[str, Any]) -> bool:
-        """
-        Implement message sending to Kafka
-        
-        Parameters:
-        - data: Dictionary containing the message data
-        
-        Returns:
-        - bool: True if message was sent successfully, False otherwise
-        """
-        
-        # Check if producer is initialized
-        if not self.producer:
-            print("ERROR: Kafka producer not initialized")
-            return False
-        
-        # Serialize the data
-        serialized_data = self.serialize_data(data)
-        if not serialized_data:
-            print("ERROR: Serialization failed")
-            return False
-        
-        try:
-            # Send message to Kafka
-            future = self.producer.send(self.topic, value=serialized_data)
-            # Wait for send confirmation with timeout
-            result = future.get(timeout=10)
-            print(f"Message sent successfully - Topic: {self.topic}, Data: {data}")
-            return True
-            
-        except KafkaError as e:
-            print(f"Kafka send error: {e}")
-            return False
-        except Exception as e:
-            print(f"Unexpected error during send: {e}")
-            return False
+    def poll_once(self) -> int:
+        fetched_at = datetime.now(timezone.utc)
+        results = self.api.fetch_current()
+        messages = to_messages(results, self.cities, fetched_at)
+        sent = self.send_messages(messages)
+        self.sent_total += sent
+        temps = ", ".join(
+            f"{m['location']} {m['value']}{m['unit']}" for m in messages if m["metric_type"] == "temperature"
+        )
+        log(f"Sent {sent} readings for {len(self.cities)} cities | {temps}")
+        return sent
 
-    def produce_stream(self, messages_per_second: float = 0.1, duration: int = None):
-        """
-        STUDENT TODO: Implement the main streaming loop
-        
-        Parameters:
-        - messages_per_second: Rate of message production (default: 0.1 for 10-second intervals)
-        - duration: Total runtime in seconds (None for infinite)
-        """
-        
-        print(f"Starting producer: {messages_per_second} msg/sec ({1/messages_per_second:.1f} second intervals), duration: {duration or 'infinite'}")
-        
-        start_time = time.time()
-        message_count = 0
-        
-        try:
-            while True:
-                # Check if we've reached the duration limit
-                if duration and (time.time() - start_time) >= duration:
-                    print(f"Reached duration limit of {duration} seconds")
-                    break
-                
-                # Generate and send data
-                data = self.generate_sample_data()
-                success = self.send_message(data)
-                
-                if success:
-                    message_count += 1
-                    if message_count % 10 == 0:  # Print progress every 10 messages
-                        print(f"Sent {message_count} messages...")
-                
-                # Calculate sleep time to maintain desired message rate
-                sleep_time = 1.0 / messages_per_second
-                time.sleep(sleep_time)
-                
-        except KeyboardInterrupt:
-            print("\nProducer interrupted by user")
-        except Exception as e:
-            print(f"Streaming error: {e}")
-        finally:
-            # Implement proper cleanup
-            self.close()
-            print(f"Producer stopped. Total messages sent: {message_count}")
+    def produce_stream(self, interval: int, duration: int | None = None, once: bool = False):
+        log(f"Streaming Open-Meteo data every {interval}s for: {', '.join(c['name'] for c in self.cities)}")
+        start = time.time()
+        backoff = interval
+        while self._running:
+            cycle_start = time.time()
+            try:
+                self.poll_once()
+                backoff = interval
+            except requests.RequestException as e:
+                backoff = min(backoff * 2, 600)
+                log(f"API request failed: {e}. Next attempt in {backoff}s")
+            except (ValueError, KeyError) as e:
+                backoff = min(backoff * 2, 600)
+                log(f"Bad API response: {e}. Next attempt in {backoff}s")
+            if once or (duration and time.time() - start >= duration):
+                break
+            # sleep in small steps so Ctrl+C / docker stop is handled quickly
+            wait_until = cycle_start + backoff
+            while self._running and time.time() < wait_until:
+                time.sleep(0.5)
+        self.close()
+
+    def stop(self, *_):
+        log("Stop signal received, shutting down...")
+        self._running = False
 
     def close(self):
-        """Implement producer cleanup and resource release"""
         if self.producer:
             try:
-                # Ensure all messages are sent
                 self.producer.flush(timeout=10)
-                # Close producer connection
                 self.producer.close()
-                print("Kafka producer closed successfully")
             except Exception as e:
-                print(f"Error closing Kafka producer: {e}")
+                log(f"Error closing producer: {e}")
+        log(f"Producer stopped. Sent {self.sent_total} messages ({self.failed_total} failed).")
 
 
 def parse_arguments():
-    """STUDENT TODO: Configure command-line arguments for flexibility"""
-    parser = argparse.ArgumentParser(description='Kafka Streaming Data Producer')
-    
-    # STUDENT TODO: Add additional command-line arguments as needed
-    parser.add_argument(
-        '--bootstrap-servers',
-        type=str,
-        default='localhost:9092',
-        help='Kafka bootstrap servers (default: localhost:9092)'
-    )
-    
-    parser.add_argument(
-        '--topic',
-        type=str,
-        default='streaming-data',
-        help='Kafka topic to produce to (default: streaming-data)'
-    )
-    
-    parser.add_argument(
-        '--rate',
-        type=float,
-        default=0.1,
-        help='Messages per second (default: 0.1 for 10-second intervals)'
-    )
-    
-    parser.add_argument(
-        '--duration',
-        type=int,
-        default=None,
-        help='Run duration in seconds (default: infinite)'
-    )
-    
-    # STUDENT TODO: Add more arguments for your specific use case
-    # parser.add_argument('--sensor-count', type=int, default=5, help='Number of simulated sensors')
-    # parser.add_argument('--data-type', choices=['temperature', 'humidity', 'financial'], default='temperature')
-    
-    return parser.parse_args()
+    p = argparse.ArgumentParser(description="Stream real weather data from Open-Meteo into Kafka")
+    p.add_argument("--bootstrap-servers", default=config.KAFKA_BOOTSTRAP_SERVERS,
+                   help=f"Kafka brokers (default: {config.KAFKA_BOOTSTRAP_SERVERS})")
+    p.add_argument("--topic", default=config.KAFKA_TOPIC, help=f"Kafka topic (default: {config.KAFKA_TOPIC})")
+    p.add_argument("--interval", type=int, default=config.PRODUCER_INTERVAL_SECONDS,
+                   help="Seconds between API polls (default: %(default)s)")
+    p.add_argument("--cities", default=None,
+                   help="Cities as 'Name:lat:lon,Name:lat:lon' (default: 5 Philippine cities)")
+    p.add_argument("--duration", type=int, default=None, help="Stop after N seconds (default: run forever)")
+    p.add_argument("--once", action="store_true", help="Fetch and send a single batch, then exit")
+    p.add_argument("--dry-run", action="store_true", help="Print messages instead of sending to Kafka")
+    return p.parse_args()
 
 
 def main():
-    """
-    STUDENT TODO: Customize the main execution flow as needed
-    
-    Implementation Steps:
-    1. Parse command-line arguments
-    2. Initialize Kafka producer
-    3. Start streaming data
-    4. Handle graceful shutdown
-    """
-    
-    print("=" * 60)
-    print("STREAMING DATA PRODUCER TEMPLATE")
-    print("STUDENT TODO: Implement all sections marked with 'STUDENT TODO'")
-    print("=" * 60)
-    
-    # Parse command-line arguments
     args = parse_arguments()
-    
-    # Initialize producer
-    producer = StreamingDataProducer(
-        bootstrap_servers=args.bootstrap_servers,
-        topic=args.topic
-    )
-    
-    # Start producing stream
-    try:
-        producer.produce_stream(
-            messages_per_second=args.rate,
-            duration=args.duration
-        )
-    except Exception as e:
-        print(f"STUDENT TODO: Handle main execution errors: {e}")
-    finally:
-        print("Producer execution completed")
+    cities = config.parse_cities(args.cities) if args.cities else config.CITIES
+    if args.interval < 15:
+        log("Interval below 15s would exceed Open-Meteo's free limits; using 15s.")
+        args.interval = 15
+
+    producer = StreamingDataProducer(args.bootstrap_servers, args.topic, cities, dry_run=args.dry_run)
+    signal.signal(signal.SIGINT, producer.stop)
+    signal.signal(signal.SIGTERM, producer.stop)
+    producer.produce_stream(args.interval, args.duration, args.once)
 
 
-# STUDENT TODO: Testing Instructions
 if __name__ == "__main__":
     main()

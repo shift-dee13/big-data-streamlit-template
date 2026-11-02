@@ -1,0 +1,17 @@
+# Spark Structured Streaming job (Kafka -> Spark -> MongoDB)
+FROM apache/spark:3.5.3-scala2.12-java17-python3-ubuntu
+
+USER root
+RUN pip install --no-cache-dir "pymongo>=4.6.0"
+
+WORKDIR /app
+COPY config.py spark_streaming.py ./
+RUN mkdir -p /app/checkpoints /tmp/.ivy2 && chown -R spark:spark /app /tmp/.ivy2
+USER spark
+
+ENV PYTHONUNBUFFERED=1
+CMD ["/opt/spark/bin/spark-submit", \
+     "--master", "local[2]", \
+     "--conf", "spark.jars.ivy=/tmp/.ivy2", \
+     "--packages", "org.apache.spark:spark-sql-kafka-0-10_2.12:3.5.3", \
+     "spark_streaming.py"]
