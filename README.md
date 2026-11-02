@@ -46,14 +46,18 @@ docker compose down -v                  # stop and delete all data
 
 ## 🛠️ Manual setup (without Docker)
 
-Prerequisites: Python 3.10+, **Java 17** (for Spark), a running Kafka broker on `localhost:9092`
+Prerequisites: **Python 3.10–3.13** (not 3.14 — PySpark doesn't support it yet), **Java 17 or 21** (for Spark), a running Kafka broker on `localhost:9092`
 and MongoDB on `localhost:27017`. You can start just Kafka and MongoDB with Docker:
 `docker compose up -d kafka mongodb`.
 
 ```bash
-conda create -n bigdata python=3.10.13
-conda activate bigdata
+# Windows (PowerShell) with Python 3.12 installed:
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
+
+# or with conda:
+#   conda create -n bigdata python=3.12 && conda activate bigdata && pip install -r requirements.txt
 
 # Terminal 1: producer (Open-Meteo -> Kafka)
 python producer.py
@@ -178,4 +182,5 @@ requirements.txt     Python dependencies
 | **Spark 🔴 no heartbeat yet** | The first start downloads the Kafka connector (needs internet). Run `docker compose logs -f spark` |
 | "No data yet" | Check `docker compose logs producer` for API errors; the first batch appears within about a minute |
 | Values change only every ~15 min | Expected. Open-Meteo refreshes its *current* conditions every 15 minutes. New readings still arrive every poll, so the live stream keeps flowing. |
-| Running Spark locally fails | Spark 3.5 needs **Java 17**; check with `java -version` |
+| Running Spark locally fails | Use Python 3.10–3.13 and **Java 17 or 21**; check with `python --version` and `java -version` |
+| `Activate.ps1` cannot be loaded | Run `Set-ExecutionPolicy -Scope CurrentUser RemoteSigned` once in PowerShell |

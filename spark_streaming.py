@@ -22,7 +22,7 @@ continuous streaming queries:
 Each micro-batch also writes a heartbeat to `pipeline_status`, which the
 dashboard uses to show whether Spark is running.
 
-Run locally (needs Java 17 and `pip install pyspark==3.5.3`):
+Run locally (needs Java 17+ and `pip install -r requirements.txt`, Python 3.10-3.13):
     python spark_streaming.py
 Run in Docker:
     docker compose up spark
@@ -69,6 +69,8 @@ def build_spark() -> SparkSession:
         .config("spark.jars.packages", kafka_pkg)
         .config("spark.sql.session.timeZone", "UTC")
         .config("spark.sql.shuffle.partitions", "4")
+        # Spark 4 turns ANSI mode on by default; keep 3.x behaviour (bad values -> null, not a crash)
+        .config("spark.sql.ansi.enabled", "false")
         .config("spark.sql.streaming.forceDeleteTempCheckpointLocation", "true")
         .getOrCreate()
     )
