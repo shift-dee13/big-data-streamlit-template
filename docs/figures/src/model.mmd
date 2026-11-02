@@ -1,0 +1,43 @@
+erDiagram
+    weather_raw {
+        string _id PK "sensor|metric|timestamp"
+        date timestamp "UTC, indexed"
+        double value
+        string metric_type "indexed"
+        string sensor_id
+        string location "indexed"
+        string unit
+        double latitude
+        double longitude
+        string observed_at
+        int weather_code
+        string weather_desc
+        string quality "ok | out_of_range"
+        int kafka_partition
+        long kafka_offset
+        date ingested_at
+    }
+    weather_agg_windowed {
+        string _id PK "sensor|metric|window_start"
+        date window_start "indexed"
+        date window_end
+        string sensor_id
+        string location
+        string metric_type
+        string unit
+        double avg
+        double min
+        double max
+        double stddev
+        long count
+        date updated_at
+    }
+    pipeline_status {
+        string _id PK "spark_raw | spark_agg"
+        date last_batch_at
+        long last_batch_id
+        long last_batch_rows
+        long total_rows
+    }
+    weather_raw ||--o{ weather_agg_windowed : "aggregated by Spark into"
+    weather_raw ||--|| pipeline_status : "heartbeat per batch"

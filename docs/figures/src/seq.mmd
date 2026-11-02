@@ -1,0 +1,27 @@
+sequenceDiagram
+    autonumber
+    participant API as Open-Meteo API
+    participant P as producer.py
+    participant K as Kafka (weather-stream)
+    participant S as Spark Streaming
+    participant M as MongoDB
+    participant D as Dashboard
+    loop every 60 seconds
+        P->>API: GET /v1/forecast (5 cities, 7 variables)
+        API-->>P: JSON list (one result per city)
+        P->>P: flatten → 35 messages
+        P->>K: send(key=sensor_id, value=JSON), acks=all
+    end
+    loop micro-batch every 10 s / 15 s
+        S->>K: read new offsets
+        S->>S: parse, filter, quality flag
+        S->>M: upsert cleaned readings (weather_raw)
+        S->>S: 5-min window avg/min/max/std/count
+        S->>M: upsert windows (weather_agg_windowed) + heartbeat
+    end
+    loop every 15 seconds (Live Monitor)
+        D->>K: poll new messages
+        K-->>D: latest readings
+    end
+    D->>M: History / Analytics / Export queries
+    M-->>D: filtered + aggregated results

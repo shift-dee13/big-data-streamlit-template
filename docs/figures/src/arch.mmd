@@ -1,0 +1,22 @@
+flowchart LR
+    API["☁️ Open-Meteo API<br/>current weather<br/>5 cities"]:::src
+    PROD["🐍 producer.py<br/>Kafka Producer"]:::py
+    KAFKA[("📨 Apache Kafka<br/>topic: weather-stream<br/>3 partitions")]:::kafka
+    SPARK["⚡ Spark Structured Streaming<br/>parse · validate · quality flag<br/>5-min windowed aggregation"]:::spark
+    MONGO[("🍃 MongoDB<br/>weather_raw<br/>weather_agg_windowed<br/>pipeline_status")]:::mongo
+    subgraph DASH["📊 Streamlit Dashboard"]
+        LIVE["📡 Live Monitor<br/>every 15 s"]
+        HIST["🗂️ History · 📊 Analytics · 📥 Export"]
+    end
+    API -- "HTTPS / JSON<br/>every 60 s" --> PROD
+    PROD -- "JSON messages<br/>key = sensor_id" --> KAFKA
+    KAFKA -- "readStream" --> SPARK
+    SPARK -- "foreachBatch<br/>upserts" --> MONGO
+    KAFKA -. "real-time path<br/>(speed layer)" .-> LIVE
+    MONGO -- "queries &<br/>aggregations" --> HIST
+    classDef src fill:#FEF3C7,stroke:#B45309,color:#111
+    classDef py fill:#DBEAFE,stroke:#1E3A8A,color:#111
+    classDef kafka fill:#E0E7FF,stroke:#3730A3,color:#111
+    classDef spark fill:#FFEDD5,stroke:#C2410C,color:#111
+    classDef mongo fill:#DCFCE7,stroke:#15803D,color:#111
+    style DASH fill:#F3E8FF,stroke:#7E22CE,color:#111

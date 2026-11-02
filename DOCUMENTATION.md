@@ -25,6 +25,18 @@
 11. [Limitations and Future Improvements](#11-limitations-and-future-improvements)
 12. [Conclusion](#12-conclusion)
 
+### List of Figures
+| Figure | Title |
+|---|---|
+| 1 | System architecture of the MongoDB–Kafka–Spark pipeline |
+| 2 | Data flow of one processing cycle (sequence diagram) |
+| 3 | Spark 5-minute tumbling windows with a 15-minute watermark |
+| 4 | MongoDB data model |
+| 5 | MongoDB vs Hadoop HDFS for a live dashboard |
+| 6 | Dashboard navigation map |
+| 7 | Dashboard Overview page (screenshot) |
+| 8 | Projected data volume as the system scales |
+
 ---
 
 ## 1. Introduction
@@ -52,37 +64,11 @@ an interactive dashboard with two views:
 
 ## 2. System Architecture
 
-```
-┌────────────────┐   HTTPS/JSON   ┌──────────────┐  JSON messages  ┌──────────────────┐
-│ Open-Meteo API │ ─────────────► │ producer.py  │ ──────────────► │   Apache Kafka   │
-│ (5 cities)     │  every 60 s    │ Kafka        │  key=sensor_id  │ topic:           │
-└────────────────┘                │ Producer     │                 │ weather-stream   │
-                                  └──────────────┘                 │ (3 partitions)   │
-                                                                   └───┬──────────┬───┘
-                                                 real-time path        │          │  processing path
-                                          ┌────────────────────────────┘          ▼
-                                          │                     ┌───────────────────────────────┐
-                                          │                     │ Spark Structured Streaming    │
-                                          │                     │ (spark_streaming.py)          │
-                                          │                     │ • parse & validate JSON       │
-                                          │                     │ • quality flags               │
-                                          │                     │ • 5-min windowed aggregation  │
-                                          │                     └───────────────┬───────────────┘
-                                          │                                     │ upserts
-                                          │                                     ▼
-                                          │                     ┌───────────────────────────────┐
-                                          │                     │ MongoDB (weather_pipeline)    │
-                                          │                     │ • weather_raw                 │
-                                          │                     │ • weather_agg_windowed        │
-                                          │                     │ • pipeline_status             │
-                                          │                     └───────────────┬───────────────┘
-                                          ▼                                     ▼
-                                  ┌─────────────────────────────────────────────────────────┐
-                                  │             Streamlit Dashboard (app.py)                │
-                                  │  Live Monitor ◄─ Kafka    History / Analytics / Export  │
-                                  │  (every 15 s)              ◄─ MongoDB                   │
-                                  └─────────────────────────────────────────────────────────┘
-```
+![Figure 1: System architecture](docs/figures/arch.png)
+
+*Figure 1. System architecture. Data flows left to right from the Open-Meteo API to the dashboard.
+The dotted line is the real-time path (Kafka → Live Monitor); the solid path through Spark and
+MongoDB is the processing and storage path.*
 
 | Component | File | Technology |
 |---|---|---|
@@ -99,6 +85,12 @@ The design is a **dual-pipeline (lambda-style) architecture**:
 - The **speed layer** (Kafka → Live Monitor) delivers data to the user within seconds.
 - The **batch/serving layer** (Kafka → Spark → MongoDB) produces a durable, validated, queryable
   history and pre-computed aggregates.
+
+![Figure 2: Data flow sequence](docs/figures/seq.png)
+
+*Figure 2. Data flow of one processing cycle. The producer polls the API every 60 s, Spark
+processes new Kafka offsets in micro-batches every 10–15 s, and the Live Monitor polls Kafka every
+15 s. History, Analytics and Export query MongoDB on demand.*
 
 ---
 
@@ -229,6 +221,13 @@ continuous streaming queries**.
 4. For each window, Spark computes **average, minimum, maximum, standard deviation and count**.
 5. Updated windows are upserted into MongoDB every 15 s (`outputMode("update")`).
 
+![Figure 3: Spark tumbling windows and watermark](docs/figures/spark_windows.png)
+
+*Figure 3. How Spark groups readings into 5-minute tumbling windows by **event time** (when the
+reading was taken, not when it arrived). The watermark trails the latest event time by 15
+minutes: a late reading inside the watermark still updates its window, while a reading older than
+the watermark is ignored. This bounds how much state Spark keeps in memory.*
+
 **Fault tolerance**
 - **Checkpointing:** each query stores its Kafka offsets and state in a checkpoint directory.
   After a restart, Spark resumes exactly where it stopped.
@@ -257,6 +256,12 @@ MongoDB stores the processed data in the database `weather_pipeline`:
 - **Aggregation pipelines** (`$match`, `$group`, `$dateTrunc`, `$hour`, `$stdDevPop`) let the
   database compute hourly, daily and weekly statistics itself. Only small results are sent to the
   dashboard.
+
+![Figure 4: MongoDB data model](docs/figures/model.png)
+
+*Figure 4. MongoDB data model. Each document's `_id` combines sensor, metric and time, which makes
+writes idempotent. `weather_agg_windowed` is derived from the same stream by Spark, and
+`pipeline_status` holds one heartbeat document per Spark query.*
 
 **Why MongoDB?** The weather messages are JSON documents, and MongoDB stores them natively with
 no schema conversion. Its flexible schema allows new metrics or metadata to be added later. It
@@ -297,6 +302,13 @@ MongoDB–Kafka–Spark was chosen for these reasons:
 | Setup | One container | NameNode, DataNode and usually YARN; heavier on a laptop |
 | Best use | Operational, interactive, near-real-time applications | Very large, write-once archives and offline batch analytics |
 
+![Figure 5: MongoDB vs HDFS](docs/figures/mongo_vs_hdfs.png)
+
+*Figure 5. Qualitative comparison of the two allowed storage options for this use case
+(scores are the author's assessment, based on the criteria in the table above). MongoDB is
+stronger on every criterion a live dashboard needs; HDFS is stronger only for very large
+write-once batch archives.*
+
 A dashboard needs **frequent, small, low-latency queries** on recent data and **live updates**.
 That is MongoDB's strength. HDFS would be a better fit for an archive of many terabytes analyzed
 in nightly batch jobs. In a larger production system, the two could be combined: MongoDB for the
@@ -318,6 +330,11 @@ It is designed to be **easy to use and navigate**.
   URI, display time zone).
 - All times are shown in the user's time zone (default: Asia/Manila).
 
+![Figure 6: Dashboard navigation map](docs/figures/nav.png)
+
+*Figure 6. Dashboard navigation map. Pages are grouped into Monitor, Explore and Project, and the
+sidebar status panel is visible on every page.*
+
 ### 6.2 Pages
 
 | Page | Purpose | Main features |
@@ -328,6 +345,12 @@ It is designed to be **easy to use and navigate**.
 | 📊 **Analytics** | Data aggregation | Trends at 15-min, hourly, 6-h, daily or weekly granularity with a min–max band; city comparison (average ± std dev, extremes); hour-of-day heatmap; correlation matrix and temperature vs humidity scatter; Spark 5-minute window results |
 | 📥 **Export** | Formatted export | Choose a dataset (raw, aggregated, summary), apply filters, choose a format: **Excel, PDF report, CSV, JSON, PNG, JPG** |
 | ℹ️ **About** | Documentation | Architecture diagram and the discussion of the API, pipeline and significance |
+
+![Figure 7: Dashboard Overview page](docs/figures/dashboard_overview.png)
+
+*Figure 7. The Overview page running on the live pipeline (2 November 2026, 16:32 PHT). All four
+status indicators are green, and real Open-Meteo readings for the five cities are shown as
+weather cards.*
 
 ### 6.3 Live updates
 The Live Monitor uses a Streamlit **fragment** that reruns only the live panel on a timer, so the
@@ -415,6 +438,13 @@ Aggregation happens at **three levels**:
 | **Variety** | Different metrics, units and value ranges, numeric and categorical (weather codes) data, plus metadata, all in semi-structured JSON. |
 | **Veracity** | Real-world data can be missing or wrong. Spark validates every record, flags implausible values and drops malformed ones. |
 | **Value** | Raw readings are turned into trends, comparisons, patterns and reports that support decisions. |
+
+![Figure 8: Projected data volume](docs/figures/data_volume.png)
+
+*Figure 8. Projected number of stored readings (log scale), calculated as
+sensors × 7 metrics × 1,440 polls per day × days. The same pipeline that handles about 50,000
+readings per day for 5 cities would need to handle billions per year at national or IoT scale,
+which is why scalable components (Kafka partitions, Spark executors, MongoDB sharding) matter.*
 
 ### 9.2 Why a big data pipeline instead of a simple script
 A simple script that calls the API and writes to a file would work for a few readings, but it would

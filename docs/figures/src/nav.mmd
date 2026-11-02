@@ -1,0 +1,17 @@
+flowchart TB
+    APP(["🌦️ Weather Streaming Dashboard"]):::root
+    APP --> M["Monitor"]:::grp
+    APP --> E["Explore"]:::grp
+    APP --> PR["Project"]:::grp
+    M --> O["🏠 Overview<br/>status · KPIs · city cards"]
+    M --> L["📡 Live Monitor<br/>Kafka · 15 s refresh · trend · feed"]
+    E --> H["🗂️ History<br/>all data · filters · table · charts"]
+    E --> A["📊 Analytics<br/>trends · city comparison · heatmap<br/>correlations · Spark windows"]
+    E --> X["📥 Export<br/>Excel · PDF · CSV · JSON · PNG · JPG"]
+    PR --> AB["ℹ️ About<br/>API · pipeline · significance"]
+    S["Sidebar: System status · Refresh · Connection settings"]:::side -.-> APP
+    classDef root fill:#1E3A8A,color:#fff,stroke:#1E3A8A
+    classDef grp fill:#DBEAFE,stroke:#1E3A8A,color:#111
+    classDef leaf fill:#EEF2FF,stroke:#6366F1,color:#111
+    class O,L,H,A,X,AB leaf
+    classDef side fill:#F1F5F9,stroke:#64748B,color:#111
