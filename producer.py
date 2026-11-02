@@ -44,12 +44,20 @@ from urllib3.util.retry import Retry
 
 import config
 
+_KAFKA_IMPORT_ERROR = None
 try:
     from kafka import KafkaProducer
-    from kafka.errors import KafkaError, NoBrokersAvailable
-except ImportError:  # allows --dry-run without kafka-python installed
+except ImportError as e:  # allows --dry-run without kafka-python installed
     KafkaProducer = None
-    KafkaError = NoBrokersAvailable = Exception
+    _KAFKA_IMPORT_ERROR = e
+try:
+    from kafka.errors import KafkaError
+except ImportError:
+    KafkaError = Exception
+try:
+    from kafka.errors import NoBrokersAvailable
+except ImportError:
+    NoBrokersAvailable = KafkaError
 
 
 def log(msg: str) -> None:
@@ -145,7 +153,8 @@ class StreamingDataProducer:
     def _connect(self, attempts: int = 20, delay: int = 5):
         """Connect to Kafka, retrying so the producer can start before the broker."""
         if KafkaProducer is None:
-            log("ERROR: kafka-python is not installed. Run: pip install -r requirements.txt")
+            log(f"ERROR: cannot import kafka-python: {_KAFKA_IMPORT_ERROR!r}")
+            log("Try: pip install --upgrade kafka-python")
             sys.exit(1)
         for attempt in range(1, attempts + 1):
             try:
